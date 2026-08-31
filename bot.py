@@ -13,12 +13,12 @@ from rapidfuzz import fuzz
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 
-# ================= Render Web Server (Port Hack for Free Tier) =================
+# ================= Render Web Server =================
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is Running Alive!")
+        self.wfile.write(b"Bot is Live & Running!")
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -26,11 +26,10 @@ def run_web_server():
     print(f"Web server running on port {port}...")
     server.serve_forever()
 
-# वेब सर्वर को बैकग्राउंड थ्रेड में चालू करना
 threading.Thread(target=run_web_server, daemon=True).start()
-# ==============================================================================
+# ====================================================
 
-# ================= Configuration (Render Env Vars) =================
+# Environment variables
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -39,41 +38,52 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DB_FILE = "indexed_data.json"
 SETTINGS_FILE = "settings.json"
 AUTO_DELETE_TIME = 30
-# =================================================================
 
 bot = Client(
     "auto_filter_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=True  # EOFError रोकेगा और टर्मिनल इनपुट की मांग नहीं करेगा
+    in_memory=True
 )
 
 def load_data():
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
 def save_data(data):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving data: {e}")
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if "db_channel" in data and isinstance(data["db_channel"], int):
-                data["db_channels"] = [data["db_channel"]]
-                del data["db_channel"]
-            if "db_channels" not in data:
-                data["db_channels"] = []
-            return data
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "db_channel" in data and isinstance(data["db_channel"], int):
+                    data["db_channels"] = [data["db_channel"]]
+                    del data["db_channel"]
+                if "db_channels" not in data:
+                    data["db_channels"] = []
+                return data
+        except Exception:
+            pass
     return {"db_channels": [], "tutorial_link": None, "custom_direct_link": None}
 
 def save_settings(data):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving settings: {e}")
 
 indexed_files = load_data()
 settings = load_settings()
@@ -299,6 +309,7 @@ async def auto_filter_search(client, message):
                 )
 
                 asyncio.create_task(auto_delete_task(sent_file, AUTO_DELETE_TIME))
+                await asyncio.sleep(1)
 
             except Exception as e:
                 print(f"Error sending file: {e}")
