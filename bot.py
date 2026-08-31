@@ -6,6 +6,7 @@ except RuntimeError:
 
 import os
 import re
+import certifi
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from rapidfuzz import fuzz
@@ -38,8 +39,8 @@ MONGO_URL = os.environ.get("MONGO_URL", "")
 
 AUTO_DELETE_TIME = 30
 
-# Database Connection
-mongo_client = AsyncIOMotorClient(MONGO_URL)
+# Database Connection with certifi (SSL Fix)
+mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
 db = mongo_client["AutoFilterBotDB"]
 files_col = db["indexed_files"]
 settings_col = db["settings"]
@@ -255,12 +256,11 @@ async def auto_filter_search(client, message):
     settings = await get_settings()
     found_files = []
 
-    # MongoDB Exact/Partial Match Search
+    # MongoDB Search
     cursor = files_col.find({"file_name": {"$regex": re.escape(query), "$options": "i"}})
     async for doc in cursor:
         found_files.append((doc["chat_id"], doc["msg_id"], doc["file_name"]))
 
-    # Fuzzy Search fallback if no exact regex match
     if not found_files:
         all_files = files_col.find({})
         async for doc in all_files:
