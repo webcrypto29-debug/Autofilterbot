@@ -33,13 +33,13 @@ threading.Thread(target=run_web_server, daemon=True).start()
 # Environment variables
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
-MONGO_URL = os.environ.get("MONGO_URL", "")
+MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 
 AUTO_DELETE_TIME = 30
 
-# Database Connection with certifi (SSL Fix)
+# Database Connection
 mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
 db = mongo_client["AutoFilterBotDB"]
 files_col = db["indexed_files"]
@@ -63,13 +63,6 @@ async def get_settings():
 
 async def update_settings(data):
     await settings_col.update_one({"_id": "bot_settings"}, {"$set": data}, upsert=True)
-
-def is_admin(_, __, message):
-    if not message.from_user:
-        return False
-    return message.from_user.id == ADMIN_ID
-
-admin_filter = filters.create(is_admin)
 
 def clean_text(text):
     if not text:
@@ -99,6 +92,11 @@ async def auto_delete_task(sent_msg, duration=AUTO_DELETE_TIME):
     except Exception as e:
         print(f"Error deleting message: {e}")
 
+def is_user_admin(message):
+    if not message.from_user:
+        return False
+    return message.from_user.id == ADMIN_ID
+
 # 1. /start Command
 @bot.on_message(filters.command("start"))
 async def start_handler(client, message):
@@ -120,8 +118,12 @@ async def start_handler(client, message):
     await message.reply_text(welcome_text, reply_markup=reply_markup)
 
 # 2. /adddb Command
-@bot.on_message(filters.command("adddb") & admin_filter)
+@bot.on_message(filters.command("adddb"))
 async def add_db_channel(client, message):
+    if not is_user_admin(message):
+        await message.reply_text("❌ **You are not authorized to use this command.**")
+        return
+
     if len(message.command) < 2:
         await message.reply_text("❌ Please provide Channel ID.\nExample: `/adddb -1001234567890`")
         return
@@ -139,8 +141,12 @@ async def add_db_channel(client, message):
         await message.reply_text(f"❌ Error: {e}")
 
 # 3. /deldb Command
-@bot.on_message(filters.command("deldb") & admin_filter)
+@bot.on_message(filters.command("deldb"))
 async def del_db_channel(client, message):
+    if not is_user_admin(message):
+        await message.reply_text("❌ **You are not authorized to use this command.**")
+        return
+
     if len(message.command) < 2:
         await message.reply_text("❌ Please provide Channel ID.\nExample: `/deldb -1001234567890`")
         return
@@ -158,8 +164,12 @@ async def del_db_channel(client, message):
         await message.reply_text(f"❌ Error: {e}")
 
 # 4. /mydb Command
-@bot.on_message(filters.command("mydb") & admin_filter)
+@bot.on_message(filters.command("mydb"))
 async def my_db_handler(client, message):
+    if not is_user_admin(message):
+        await message.reply_text("❌ **You are not authorized to use this command.**")
+        return
+
     settings = await get_settings()
     channels = settings.get("db_channels", [])
     total_files = await files_col.count_documents({})
@@ -173,8 +183,12 @@ async def my_db_handler(client, message):
         )
 
 # 5. /setdirectlink Command
-@bot.on_message(filters.command("setdirectlink") & admin_filter)
+@bot.on_message(filters.command("setdirectlink"))
 async def set_direct_link(client, message):
+    if not is_user_admin(message):
+        await message.reply_text("❌ **You are not authorized to use this command.**")
+        return
+
     if len(message.command) < 2:
         await message.reply_text("❌ Please provide link or reset command.\nExample: `/setdirectlink https://t.me/your_channel`")
         return
@@ -188,8 +202,12 @@ async def set_direct_link(client, message):
         await message.reply_text(f"✅ **Custom Direct Link updated to:**\n`{link}`")
 
 # 6. /settutorial Command
-@bot.on_message(filters.command("settutorial") & admin_filter)
+@bot.on_message(filters.command("settutorial"))
 async def set_tutorial(client, message):
+    if not is_user_admin(message):
+        await message.reply_text("❌ **You are not authorized to use this command.**")
+        return
+
     if len(message.command) < 2:
         await message.reply_text("❌ Please provide tutorial link.\nExample: `/settutorial https://t.me/your_video`")
         return
@@ -197,8 +215,12 @@ async def set_tutorial(client, message):
     await message.reply_text("✅ **Tutorial Link updated!**")
 
 # 7. /delete Command
-@bot.on_message(filters.command("delete") & admin_filter)
+@bot.on_message(filters.command("delete"))
 async def delete_file_handler(client, message):
+    if not is_user_admin(message):
+        await message.reply_text("❌ **You are not authorized to use this command.**")
+        return
+
     if len(message.command) < 2:
         await message.reply_text("❌ Provide movie/file name to delete.\nExample: `/delete avengers`")
         return
@@ -212,8 +234,11 @@ async def delete_file_handler(client, message):
         await message.reply_text("❌ File not found in database.")
 
 # 8. Manual Forward Index
-@bot.on_message(filters.private & admin_filter & filters.forwarded)
+@bot.on_message(filters.private & filters.forwarded)
 async def manual_forward_index(client, message):
+    if not is_user_admin(message):
+        return
+
     clean_name = extract_file_name(message)
     settings = await get_settings()
     if clean_name:
@@ -242,7 +267,7 @@ async def auto_index_new_file(client, message):
             )
             print(f"[Auto-Index Live] 🔥 न्यू फाइल अपने आप सेव हुई ({message.chat.title}): {clean_name}")
 
-# 10. AUTO FILTER SEARCH LOGIC WITH AUTO-DELETE
+# 10. AUTO FILTER SEARCH LOGIC WITH ERROR HANDLING
 @bot.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start", "adddb", "deldb", "mydb", "settutorial", "setdirectlink", "delete"]))
 async def auto_filter_search(client, message):
     if message.forward_date:
@@ -256,22 +281,24 @@ async def auto_filter_search(client, message):
     settings = await get_settings()
     found_files = []
 
-    # MongoDB Search
-    cursor = files_col.find({"file_name": {"$regex": re.escape(query), "$options": "i"}})
+    # 1. Broad Regex Match
+    search_pattern = ".*".join(re.escape(word) for word in query.split())
+    cursor = files_col.find({"file_name": {"$regex": search_pattern, "$options": "i"}})
     async for doc in cursor:
         found_files.append((doc["chat_id"], doc["msg_id"], doc["file_name"]))
 
+    # 2. Fuzzy Match Fallback
     if not found_files:
         all_files = files_col.find({})
         async for doc in all_files:
-            if fuzz.partial_ratio(query, doc["file_name"]) >= 80:
+            if fuzz.partial_ratio(query, doc["file_name"]) >= 60:
                 found_files.append((doc["chat_id"], doc["msg_id"], doc["file_name"]))
 
     if found_files:
+        success = False
         for chat_id, msg_id, f_name in found_files[:3]:
             try:
                 buttons = []
-
                 if settings.get("custom_direct_link"):
                     file_link = settings["custom_direct_link"]
                 else:
@@ -292,11 +319,16 @@ async def auto_filter_search(client, message):
                 )
 
                 asyncio.create_task(auto_delete_task(sent_file, AUTO_DELETE_TIME))
+                success = True
                 await asyncio.sleep(1)
 
             except Exception as e:
-                print(f"Error sending file: {e}")
-        return
+                print(f"Error copying file from chat {chat_id}, msg {msg_id}: {e}")
+                err_msg = await message.reply_text(f"⚠️ **फाइल copy करने में एरर आई:**\n`{e}`\n\n*कृपया सुनिश्चित करें कि बॉट चैनल में Admin है!*")
+                asyncio.create_task(auto_delete_task(err_msg, 15))
+
+        if success:
+            return
 
     not_found_msg = await message.reply_text("❌ **This file is currently unavailable, but it will be uploaded soon.**")
     asyncio.create_task(auto_delete_task(not_found_msg, 10))
