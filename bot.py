@@ -10,6 +10,25 @@ import json
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from rapidfuzz import fuzz
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+
+# ================= Render Web Server (Port Hack for Free Tier) =================
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is Running Alive!")
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    print(f"Web server running on port {port}...")
+    server.serve_forever()
+
+# वेब सर्वर को बैकग्राउंड थ्रेड में चालू करना
+threading.Thread(target=run_web_server, daemon=True).start()
+# ==============================================================================
 
 # ================= Configuration (Render Env Vars) =================
 API_ID = int(os.environ.get("API_ID", 0))
@@ -19,7 +38,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
 DB_FILE = "indexed_data.json"
 SETTINGS_FILE = "settings.json"
-AUTO_DELETE_TIME = 30  # 30 सेकंड ऑटो-डिलीट
+AUTO_DELETE_TIME = 30
 # =================================================================
 
 bot = Client(
