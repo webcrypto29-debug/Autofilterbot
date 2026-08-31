@@ -45,7 +45,8 @@ bot = Client(
     "auto_filter_bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    in_memory=True  # EOFError रोकेगा और टर्मिनल इनपुट की मांग नहीं करेगा
 )
 
 def load_data():
