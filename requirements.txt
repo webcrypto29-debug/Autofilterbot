@@ -1,3 +1,5 @@
 pyrogram
 tgcrypto
 rapidfuzz
+motor
+dnspython
