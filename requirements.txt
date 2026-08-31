@@ -3,3 +3,4 @@ tgcrypto
 rapidfuzz
 motor
 dnspython
+certifi
