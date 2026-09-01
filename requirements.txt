@@ -1,6 +1,5 @@
 pyrogram
 tgcrypto
-rapidfuzz
 motor
-dnspython
 certifi
+aiohttp
