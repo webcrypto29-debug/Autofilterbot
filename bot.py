@@ -38,7 +38,7 @@ MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 
 AUTO_DELETE_TIME = 30
 
-# Database Connection with certifi & Strip Fix
+# Database Connection
 mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
 db = mongo_client["AutoFilterBotDB"]
 files_col = db["indexed_files"]
@@ -70,7 +70,6 @@ async def update_settings(data):
 def clean_text(text):
     if not text:
         return ""
-    # Remove dots, underscores, dashes, brackets
     text = re.sub(r'[._\-\[\]\(\)]', ' ', str(text)).lower().strip()
     return " ".join(text.split())
 
@@ -97,6 +96,15 @@ def is_user_admin(message):
     if not message.from_user:
         return False
     return message.from_user.id == ADMIN_ID
+
+# Helper function to cache private channels and avoid PeerIdInvalid Error
+async def ensure_chat_cached(client, chat_id):
+    try:
+        await client.get_chat(chat_id)
+        return True
+    except Exception as e:
+        print(f"Failed to resolve peer chat {chat_id}: {e}")
+        return False
 
 # 1. /start Command
 @bot.on_message(filters.command("start"))
@@ -130,12 +138,18 @@ async def add_db_channel(client, message):
         return
     try:
         chat_id = int(message.command[1])
+        # Force cache channel peer
+        cached = await ensure_chat_cached(client, chat_id)
+        if not cached:
+            await message.reply_text("⚠️ **बॉट चैनल को एक्सेस नहीं कर पा रहा है। सुनिश्चित करें कि बॉट चैनल में Admin है!**")
+            return
+
         settings = await get_settings()
         db_channels = settings.get("db_channels", [])
         if chat_id not in db_channels:
             db_channels.append(chat_id)
             await update_settings({"db_channels": db_channels})
-            await message.reply_text(f"✅ **Database Channel Added:** `{chat_id}`")
+            await message.reply_text(f"✅ **Database Channel Added & Cached:** `{chat_id}`")
         else:
             await message.reply_text("⚠️ **यह चैनल पहले से ही ऐड है!**")
     except Exception as e:
@@ -301,6 +315,9 @@ async def auto_filter_search(client, message):
         success = False
         for chat_id, msg_id, f_name in found_files[:3]:
             try:
+                # Resolve Channel Peer Fix
+                await ensure_chat_cached(client, chat_id)
+
                 buttons = []
                 if settings.get("custom_direct_link"):
                     file_link = settings["custom_direct_link"]
@@ -329,8 +346,7 @@ async def auto_filter_search(client, message):
             except Exception as e:
                 print(f"Send File Error: {e}")
                 err_msg = await message.reply_text(
-                    f"⚠️ **फाइल भेजने में एरर आई:**\n`{e}`\n\n"
-                    "👉 **समाधान:** क्या बोट आपके डेटाबेस चैनल में **Admin** है?"
+                    f"⚠️ **फाइल भेजने में एरर आई:**\n`{e}`"
                 )
                 asyncio.create_task(auto_delete_task(err_msg, 15))
 
