@@ -48,8 +48,7 @@ bot = Client(
     "auto_filter_bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True
+    bot_token=BOT_TOKEN
 )
 
 async def get_settings():
@@ -97,7 +96,6 @@ def is_user_admin(message):
         return False
     return message.from_user.id == ADMIN_ID
 
-# Helper function to cache private channels and avoid PeerIdInvalid Error
 async def ensure_chat_cached(client, chat_id):
     try:
         await client.get_chat(chat_id)
@@ -138,7 +136,6 @@ async def add_db_channel(client, message):
         return
     try:
         chat_id = int(message.command[1])
-        # Force cache channel peer
         cached = await ensure_chat_cached(client, chat_id)
         if not cached:
             await message.reply_text("⚠️ **बॉट चैनल को एक्सेस नहीं कर पा रहा है। सुनिश्चित करें कि बॉट चैनल में Admin है!**")
@@ -303,7 +300,6 @@ async def auto_filter_search(client, message):
     settings = await get_settings()
     found_files = []
 
-    # Search in database: All words must match
     words = query.split()
     regex_pattern = "".join([f"(?=.*{re.escape(w)})" for w in words])
     
@@ -315,7 +311,6 @@ async def auto_filter_search(client, message):
         success = False
         for chat_id, msg_id, f_name in found_files[:3]:
             try:
-                # Resolve Channel Peer Fix
                 await ensure_chat_cached(client, chat_id)
 
                 buttons = []
@@ -331,7 +326,6 @@ async def auto_filter_search(client, message):
 
                 reply_markup = InlineKeyboardMarkup(buttons)
 
-                # Send file by copying message
                 sent_file = await client.copy_message(
                     chat_id=message.chat.id,
                     from_chat_id=chat_id,
