@@ -1,40 +1,24 @@
 import asyncio
 import os
 import re
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
 import certifi
+from aiohttp import web
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, RPCError
 
-# ================= 1. Render Keep-Alive Web Server =================
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is Live & Running!")
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    print(f"Web server running on port {port}...")
-    server.serve_forever()
-
-threading.Thread(target=run_web_server, daemon=True).start()
-
-# ================= 2. Config & Environment Variables =================
+# ================= 1. Environment Variables =================
 API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 MONGO_URL = os.environ.get("MONGO_URL", "").strip()
+PORT = int(os.environ.get("PORT", 8080))
 
 AUTO_DELETE_TIME = 30  # Auto delete duration in seconds
 
-# ================= 3. Database Setup =================
+# ================= 2. Database Connection =================
 mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
 db = mongo_client["AutoFilterBotDB"]
 files_col = db["indexed_files"]
@@ -47,7 +31,7 @@ bot = Client(
     bot_token=BOT_TOKEN
 )
 
-# Helper Functions
+# ================= 3. Helper Functions =================
 async def get_settings():
     try:
         doc = await settings_col.find_one({"_id": "bot_settings"})
@@ -90,13 +74,13 @@ async def auto_delete_task(sent_msg, duration=AUTO_DELETE_TIME):
     try:
         await sent_msg.delete()
     except Exception:
-        pass  # Message was already deleted
+        pass  # Message already deleted
 
 def is_admin(message):
     return bool(message.from_user and message.from_user.id == ADMIN_ID)
 
 
-# ================= 4. Commands Handlers =================
+# ================= 4. Bot Command Handlers =================
 
 # Start Command
 @bot.on_message(filters.command("start") & filters.private)
@@ -131,7 +115,6 @@ async def add_db_channel(client, message):
     
     try:
         chat_id = int(message.command[1])
-        # Try fetching chat to verify admin rights and access
         await client.get_chat(chat_id)
 
         settings = await get_settings()
@@ -142,9 +125,9 @@ async def add_db_channel(client, message):
             await update_settings({"db_channels": db_channels})
             await message.reply_text(f"✅ **Database Channel Added:** `{chat_id}`")
         else:
-            await message.reply_text("⚠️ This channel is already in the list.")
+            await message.reply_text("⚠️ This channel is already connected.")
     except Exception as e:
-        await message.reply_text(f"❌ Cannot connect to channel. Make sure Bot is Admin in it.\nError: `{e}`")
+        await message.reply_text(f"❌ Cannot access channel. Make sure Bot is Admin in it.\nError: `{e}`")
 
 # Delete Database Channel
 @bot.on_message(filters.command("deldb"))
@@ -165,7 +148,7 @@ async def del_db_channel(client, message):
             await update_settings({"db_channels": db_channels})
             await message.reply_text(f"🗑️ **Database Channel Removed:** `{chat_id}`")
         else:
-            await message.reply_text("❌ Channel not found in settings.")
+            await message.reply_text("❌ Channel not found in list.")
     except Exception as e:
         await message.reply_text(f"❌ Error: `{e}`")
 
@@ -183,9 +166,9 @@ async def set_tutorial(client, message):
     await message.reply_text("✅ **Tutorial Link updated successfully!**")
 
 
-# ================= 5. Auto File Indexing =================
+# ================= 5. File Indexing Logic =================
 
-# Auto Index Posts from Connected Channels
+# Auto Index Posts from DB Channels
 @bot.on_message(filters.channel & (filters.document | filters.video | filters.audio))
 async def auto_index_channel(client, message):
     try:
@@ -200,7 +183,7 @@ async def auto_index_channel(client, message):
                     {"$set": {"msg_id": message.id, "original_caption": message.caption or clean_name}},
                     upsert=True
                 )
-                print(f"[Indexed] {clean_name}")
+                print(f"[Auto-Indexed] {clean_name}")
     except Exception as e:
         print(f"Indexing Error: {e}")
 
@@ -222,10 +205,10 @@ async def manual_forward_index(client, message):
             {"$set": {"msg_id": msg_id, "original_caption": message.caption or clean_name}},
             upsert=True
         )
-        await message.reply_text(f"✅ **File Indexed:** `{clean_name}`")
+        await message.reply_text(f"✅ **File Saved to DB:** `{clean_name}`")
 
 
-# ================= 6. Movie Search & Filter Logic =================
+# ================= 6. Search & Send Engine =================
 @bot.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start", "adddb", "deldb", "settutorial"]))
 async def auto_filter_search(client, message):
     if message.forward_date:
@@ -240,7 +223,7 @@ async def auto_filter_search(client, message):
     settings = await get_settings()
     found_files = []
 
-    # Fuzzy Matching: Splits words so "Hanuman" matches "Hanuman 2024 1080p"
+    # Word-by-Word Fuzzy Matching Regex
     words = query.split()
     regex_pattern = "".join([f"(?=.*{re.escape(w)})" for w in words])
     
@@ -250,10 +233,9 @@ async def auto_filter_search(client, message):
 
     if found_files:
         success = False
-        # Send up to 5 matching files
         for chat_id, msg_id, f_name in found_files[:5]:
             try:
-                # Direct File TG Link
+                # Telegram Direct File Link
                 file_link = f"https://t.me/c/{str(chat_id).replace('-100', '')}/{msg_id}"
 
                 buttons = [[InlineKeyboardButton("📁 Direct File", url=file_link)]]
@@ -269,7 +251,6 @@ async def auto_filter_search(client, message):
                     reply_markup=reply_markup
                 )
 
-                # Trigger Auto Delete
                 asyncio.create_task(auto_delete_task(sent_file, AUTO_DELETE_TIME))
                 success = True
                 await asyncio.sleep(0.8)
@@ -285,7 +266,31 @@ async def auto_filter_search(client, message):
     not_found_msg = await message.reply_text("❌ **This file is currently unavailable, but it will be uploaded soon.**")
     asyncio.create_task(auto_delete_task(not_found_msg, 10))
 
-# ================= 7. Bot Runner =================
+
+# ================= 7. Render Web Server & Main Async Loop =================
+async def web_handle(request):
+    return web.Response(text="Bot is Live and Running on Render Web Service!")
+
+async def main():
+    # 1. Setup Web Server for Render Health Check
+    app = web.Application()
+    app.router.add_get("/", web_handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"Render Web Server started on port {PORT}")
+
+    # 2. Start Pyrogram Client
+    await bot.start()
+    print("Pyrogram Auto Filter Bot Started!")
+    
+    # 3. Keep Event Loop Alive
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
-    print("Auto Filter Bot successfully started...")
-    bot.run()
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("Bot Stopped!")
