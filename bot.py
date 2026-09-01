@@ -9,7 +9,6 @@ import re
 import certifi
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from rapidfuzz import fuzz
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -39,7 +38,7 @@ MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 
 AUTO_DELETE_TIME = 30
 
-# Database Connection
+# Database Connection with certifi & Strip Fix
 mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
 db = mongo_client["AutoFilterBotDB"]
 files_col = db["indexed_files"]
@@ -54,12 +53,16 @@ bot = Client(
 )
 
 async def get_settings():
-    doc = await settings_col.find_one({"_id": "bot_settings"})
-    if not doc:
-        default_settings = {"_id": "bot_settings", "db_channels": [], "tutorial_link": None, "custom_direct_link": None}
-        await settings_col.insert_one(default_settings)
-        return default_settings
-    return doc
+    try:
+        doc = await settings_col.find_one({"_id": "bot_settings"})
+        if not doc:
+            default_settings = {"_id": "bot_settings", "db_channels": [], "tutorial_link": None, "custom_direct_link": None}
+            await settings_col.insert_one(default_settings)
+            return default_settings
+        return doc
+    except Exception as e:
+        print(f"Database Error: {e}")
+        return {"_id": "bot_settings", "db_channels": [], "tutorial_link": None, "custom_direct_link": None}
 
 async def update_settings(data):
     await settings_col.update_one({"_id": "bot_settings"}, {"$set": data}, upsert=True)
@@ -67,6 +70,7 @@ async def update_settings(data):
 def clean_text(text):
     if not text:
         return ""
+    # Remove dots, underscores, dashes, brackets
     text = re.sub(r'[._\-\[\]\(\)]', ' ', str(text)).lower().strip()
     return " ".join(text.split())
 
@@ -80,9 +84,6 @@ def extract_file_name(message):
         file_name = message.audio.file_name or message.caption
     elif message.caption:
         file_name = message.caption
-    elif message.text:
-        file_name = message.text
-
     return clean_text(file_name)
 
 async def auto_delete_task(sent_msg, duration=AUTO_DELETE_TIME):
@@ -105,7 +106,7 @@ async def start_handler(client, message):
     welcome_text = (
         f"👋 **Hello {user_name}!**\n\n"
         "🎬 **How to search for movies/files:**\n"
-        "Send only the exact title in **English**.\n\n"
+        "Send only the movie or series title in **English**.\n\n"
         "✅ **Correct:** `Avengers` or `Avatar`\n"
         "❌ **Incorrect:** `Avengers movie chahiye` or `please send Avengers`\n\n"
         "⚠️ *Note:* Files will automatically self-destruct after 30 seconds."
@@ -179,7 +180,7 @@ async def my_db_handler(client, message):
         chan_list = "\n".join([f"• `{cid}`" for cid in channels])
         await message.reply_text(
             f"📢 **Connected Channels ({len(channels)}):**\n{chan_list}\n\n"
-            f"📁 **Total Indexed Files:** `{total_files}`"
+            f"📁 **Total Indexed Files in Database:** `{total_files}`"
         )
 
 # 5. /setdirectlink Command
@@ -233,47 +234,54 @@ async def delete_file_handler(client, message):
     else:
         await message.reply_text("❌ File not found in database.")
 
-# 8. Manual Forward Index
-@bot.on_message(filters.private & filters.forwarded)
+# 8. MANUAL FORWARD FILE INDEXING
+@bot.on_message(filters.private & filters.forwarded & (filters.document | filters.video | filters.audio))
 async def manual_forward_index(client, message):
     if not is_user_admin(message):
         return
 
     clean_name = extract_file_name(message)
     settings = await get_settings()
+
     if clean_name:
         chat_id = message.forward_from_chat.id if message.forward_from_chat else (settings["db_channels"][0] if settings.get("db_channels") else message.chat.id)
         msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
 
         await files_col.update_one(
             {"file_name": clean_name},
-            {"$set": {"chat_id": chat_id, "msg_id": msg_id}},
+            {"$set": {"chat_id": chat_id, "msg_id": msg_id, "original_caption": message.caption or clean_name}},
             upsert=True
         )
-        await message.reply_text(f"✅ **Manual File Saved!**\n📌 `{clean_name}`")
+        await message.reply_text(f"✅ **File Saved Successfully!**\n📌 `{clean_name}`")
+    else:
+        await message.reply_text("❌ **इस मैसेज में कोई फाइल/वीडियो का नाम नहीं मिला।**")
 
-# 9. MULTI-CHANNEL AUTO-INDEX LISTENER
-@bot.on_message(filters.channel)
+# 9. AUTO INDEX CHANNEL POSTS
+@bot.on_message(filters.channel & (filters.document | filters.video | filters.audio))
 async def auto_index_new_file(client, message):
-    settings = await get_settings()
-    db_channels = settings.get("db_channels", [])
-    if message.chat.id in db_channels:
-        clean_name = extract_file_name(message)
-        if clean_name:
-            await files_col.update_one(
-                {"file_name": clean_name},
-                {"$set": {"chat_id": message.chat.id, "msg_id": message.id}},
-                upsert=True
-            )
-            print(f"[Auto-Index Live] 🔥 न्यू फाइल अपने आप सेव हुई ({message.chat.title}): {clean_name}")
+    try:
+        settings = await get_settings()
+        db_channels = settings.get("db_channels", [])
+        if message.chat.id in db_channels:
+            clean_name = extract_file_name(message)
+            if clean_name:
+                await files_col.update_one(
+                    {"file_name": clean_name},
+                    {"$set": {"chat_id": message.chat.id, "msg_id": message.id, "original_caption": message.caption or clean_name}},
+                    upsert=True
+                )
+                print(f"[Auto-Index Successful] Saved: {clean_name}")
+    except Exception as e:
+        print(f"Auto Index Error: {e}")
 
-# 10. AUTO FILTER SEARCH LOGIC WITH ERROR HANDLING
+# 10. SEARCH & SEND FILE LOGIC
 @bot.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start", "adddb", "deldb", "mydb", "settutorial", "setdirectlink", "delete"]))
 async def auto_filter_search(client, message):
     if message.forward_date:
         return
 
-    query = clean_text(message.text)
+    raw_query = message.text.strip()
+    query = clean_text(raw_query)
 
     if not query or len(query) < 2:
         return
@@ -281,18 +289,13 @@ async def auto_filter_search(client, message):
     settings = await get_settings()
     found_files = []
 
-    # 1. Broad Regex Match
-    search_pattern = ".*".join(re.escape(word) for word in query.split())
-    cursor = files_col.find({"file_name": {"$regex": search_pattern, "$options": "i"}})
+    # Search in database: All words must match
+    words = query.split()
+    regex_pattern = "".join([f"(?=.*{re.escape(w)})" for w in words])
+    
+    cursor = files_col.find({"file_name": {"$regex": regex_pattern, "$options": "i"}})
     async for doc in cursor:
         found_files.append((doc["chat_id"], doc["msg_id"], doc["file_name"]))
-
-    # 2. Fuzzy Match Fallback
-    if not found_files:
-        all_files = files_col.find({})
-        async for doc in all_files:
-            if fuzz.partial_ratio(query, doc["file_name"]) >= 60:
-                found_files.append((doc["chat_id"], doc["msg_id"], doc["file_name"]))
 
     if found_files:
         success = False
@@ -311,6 +314,7 @@ async def auto_filter_search(client, message):
 
                 reply_markup = InlineKeyboardMarkup(buttons)
 
+                # Send file by copying message
                 sent_file = await client.copy_message(
                     chat_id=message.chat.id,
                     from_chat_id=chat_id,
@@ -323,8 +327,11 @@ async def auto_filter_search(client, message):
                 await asyncio.sleep(1)
 
             except Exception as e:
-                print(f"Error copying file from chat {chat_id}, msg {msg_id}: {e}")
-                err_msg = await message.reply_text(f"⚠️ **फाइल copy करने में एरर आई:**\n`{e}`\n\n*कृपया सुनिश्चित करें कि बॉट चैनल में Admin है!*")
+                print(f"Send File Error: {e}")
+                err_msg = await message.reply_text(
+                    f"⚠️ **फाइल भेजने में एरर आई:**\n`{e}`\n\n"
+                    "👉 **समाधान:** क्या बोट आपके डेटाबेस चैनल में **Admin** है?"
+                )
                 asyncio.create_task(auto_delete_task(err_msg, 15))
 
         if success:
