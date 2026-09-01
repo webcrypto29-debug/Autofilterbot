@@ -8,8 +8,9 @@ import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import FloodWait, RPCError
 
-# ================= Render Web Server =================
+# ================= 1. Render Keep-Alive Web Server =================
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -23,18 +24,17 @@ def run_web_server():
     server.serve_forever()
 
 threading.Thread(target=run_web_server, daemon=True).start()
-# ====================================================
 
-# Environment variables
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH", "")
+# ================= 2. Config & Environment Variables =================
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 
-AUTO_DELETE_TIME = 30
+AUTO_DELETE_TIME = 30  # Auto delete duration in seconds
 
-# Database Connection (Lazy initialization to prevent event loop issues)
+# ================= 3. Database Setup =================
 mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
 db = mongo_client["AutoFilterBotDB"]
 files_col = db["indexed_files"]
@@ -47,6 +47,7 @@ bot = Client(
     bot_token=BOT_TOKEN
 )
 
+# Helper Functions
 async def get_settings():
     try:
         doc = await settings_col.find_one({"_id": "bot_settings"})
@@ -54,15 +55,14 @@ async def get_settings():
             default_settings = {
                 "_id": "bot_settings", 
                 "db_channels": [], 
-                "tutorial_link": None, 
-                "custom_direct_link": None
+                "tutorial_link": None
             }
             await settings_col.insert_one(default_settings)
             return default_settings
         return doc
     except Exception as e:
         print(f"Database Error: {e}")
-        return {"_id": "bot_settings", "db_channels": [], "tutorial_link": None, "custom_direct_link": None}
+        return {"_id": "bot_settings", "db_channels": [], "tutorial_link": None}
 
 async def update_settings(data):
     await settings_col.update_one({"_id": "bot_settings"}, {"$set": data}, upsert=True)
@@ -90,32 +90,29 @@ async def auto_delete_task(sent_msg, duration=AUTO_DELETE_TIME):
     try:
         await sent_msg.delete()
     except Exception:
-        pass  # Message was already deleted by the user
+        pass  # Message was already deleted
 
-def is_user_admin(message):
+def is_admin(message):
     return bool(message.from_user and message.from_user.id == ADMIN_ID)
 
-async def ensure_chat_cached(client, chat_id):
-    try:
-        await client.get_chat(chat_id)
-        return True
-    except Exception as e:
-        print(f"Failed to resolve peer chat {chat_id}: {e}")
-        return False
 
-# 1. /start Command
+# ================= 4. Commands Handlers =================
+
+# Start Command
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     user_name = message.from_user.first_name if message.from_user else "User"
     settings = await get_settings()
+    
     welcome_text = (
         f"👋 **Hello {user_name}!**\n\n"
         "🎬 **How to search for movies/files:**\n"
         "Send only the movie or series title in **English**.\n\n"
-        "✅ **Correct:** `Avengers` or `Avatar`\n"
-        "❌ **Incorrect:** `Avengers movie chahiye` or `please send Avengers`\n\n"
-        "⚠️ *Note:* Files will automatically self-destruct after 30 seconds."
+        "✅ **Correct:** `Avengers` or `Hanuman`\n"
+        "❌ **Incorrect:** `Avengers movie chahiye` or `please send Hanuman`\n\n"
+        f"⚠️ *Note:* Files will automatically self-destruct after {AUTO_DELETE_TIME} seconds."
     )
+    
     buttons = []
     if settings.get("tutorial_link"):
         buttons.append([InlineKeyboardButton("❓ How to Download", url=settings["tutorial_link"])])
@@ -123,127 +120,94 @@ async def start_handler(client, message):
     reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
     await message.reply_text(welcome_text, reply_markup=reply_markup)
 
-# 2. /adddb Command
+# Add Database Channel
 @bot.on_message(filters.command("adddb"))
 async def add_db_channel(client, message):
-    if not is_user_admin(message):
-        return await message.reply_text("❌ **You are not authorized to use this command.**")
+    if not is_admin(message):
+        return await message.reply_text("❌ You are not authorized.")
 
     if len(message.command) < 2:
-        return await message.reply_text("❌ Please provide Channel ID.\nExample: `/adddb -1001234567890`")
+        return await message.reply_text("❌ Provide Channel ID.\nExample: `/adddb -1001234567890`")
     
     try:
         chat_id = int(message.command[1])
-        cached = await ensure_chat_cached(client, chat_id)
-        if not cached:
-            return await message.reply_text("⚠️ **Bot cannot access this channel. Ensure the Bot is an Admin in the channel!**")
+        # Try fetching chat to verify admin rights and access
+        await client.get_chat(chat_id)
 
         settings = await get_settings()
         db_channels = settings.get("db_channels", [])
+        
         if chat_id not in db_channels:
             db_channels.append(chat_id)
             await update_settings({"db_channels": db_channels})
-            await message.reply_text(f"✅ **Database Channel Added & Cached:** `{chat_id}`")
+            await message.reply_text(f"✅ **Database Channel Added:** `{chat_id}`")
         else:
-            await message.reply_text("⚠️ **This channel is already added!**")
-    except ValueError:
-        await message.reply_text("❌ Invalid Channel ID. Ensure it is an integer.")
+            await message.reply_text("⚠️ This channel is already in the list.")
     except Exception as e:
-        await message.reply_text(f"❌ Error: {e}")
+        await message.reply_text(f"❌ Cannot connect to channel. Make sure Bot is Admin in it.\nError: `{e}`")
 
-# 3. /deldb Command
+# Delete Database Channel
 @bot.on_message(filters.command("deldb"))
 async def del_db_channel(client, message):
-    if not is_user_admin(message):
-        return await message.reply_text("❌ **You are not authorized to use this command.**")
+    if not is_admin(message):
+        return await message.reply_text("❌ You are not authorized.")
 
     if len(message.command) < 2:
-        return await message.reply_text("❌ Please provide Channel ID.\nExample: `/deldb -1001234567890`")
+        return await message.reply_text("❌ Provide Channel ID.\nExample: `/deldb -1001234567890`")
     
     try:
         chat_id = int(message.command[1])
         settings = await get_settings()
         db_channels = settings.get("db_channels", [])
+        
         if chat_id in db_channels:
             db_channels.remove(chat_id)
             await update_settings({"db_channels": db_channels})
             await message.reply_text(f"🗑️ **Database Channel Removed:** `{chat_id}`")
         else:
-            await message.reply_text("❌ **Channel not found in database.**")
-    except ValueError:
-        await message.reply_text("❌ Invalid Channel ID.")
+            await message.reply_text("❌ Channel not found in settings.")
     except Exception as e:
-        await message.reply_text(f"❌ Error: {e}")
+        await message.reply_text(f"❌ Error: `{e}`")
 
-# 4. /mydb Command
-@bot.on_message(filters.command("mydb"))
-async def my_db_handler(client, message):
-    if not is_user_admin(message):
-        return await message.reply_text("❌ **You are not authorized to use this command.**")
-
-    settings = await get_settings()
-    channels = settings.get("db_channels", [])
-    total_files = await files_col.count_documents({})
-    
-    if not channels:
-        await message.reply_text("❌ No Database Channels configured. Use `/adddb`.")
-    else:
-        chan_list = "\n".join([f"• `{cid}`" for cid in channels])
-        await message.reply_text(
-            f"📢 **Connected Channels ({len(channels)}):**\n{chan_list}\n\n"
-            f"📁 **Total Indexed Files in Database:** `{total_files}`"
-        )
-
-# 5. /setdirectlink Command
-@bot.on_message(filters.command("setdirectlink"))
-async def set_direct_link(client, message):
-    if not is_user_admin(message):
-        return await message.reply_text("❌ **You are not authorized to use this command.**")
-
-    if len(message.command) < 2:
-        return await message.reply_text("❌ Please provide link or reset command.\nExample: `/setdirectlink https://t.me/your_channel`")
-
-    link = message.command[1].strip()
-    if link.lower() == "reset":
-        await update_settings({"custom_direct_link": None})
-        await message.reply_text("✅ **Direct File link reset to default!**")
-    else:
-        await update_settings({"custom_direct_link": link})
-        await message.reply_text(f"✅ **Custom Direct Link updated to:**\n`{link}`")
-
-# 6. /settutorial Command
+# Set Tutorial Link
 @bot.on_message(filters.command("settutorial"))
 async def set_tutorial(client, message):
-    if not is_user_admin(message):
-        return await message.reply_text("❌ **You are not authorized to use this command.**")
+    if not is_admin(message):
+        return await message.reply_text("❌ You are not authorized.")
 
     if len(message.command) < 2:
-        return await message.reply_text("❌ Please provide tutorial link.\nExample: `/settutorial https://t.me/your_video`")
+        return await message.reply_text("❌ Provide tutorial link.\nExample: `/settutorial https://t.me/your_video`")
     
-    await update_settings({"tutorial_link": message.command[1]})
-    await message.reply_text("✅ **Tutorial Link updated!**")
+    link = message.command[1].strip()
+    await update_settings({"tutorial_link": link})
+    await message.reply_text("✅ **Tutorial Link updated successfully!**")
 
-# 7. /delete Command
-@bot.on_message(filters.command("delete"))
-async def delete_file_handler(client, message):
-    if not is_user_admin(message):
-        return await message.reply_text("❌ **You are not authorized to use this command.**")
 
-    if len(message.command) < 2:
-        return await message.reply_text("❌ Provide movie/file name to delete.\nExample: `/delete avengers`")
+# ================= 5. Auto File Indexing =================
 
-    query = clean_text(" ".join(message.command[1:]))
-    result = await files_col.delete_many({"file_name": {"$regex": query, "$options": "i"}})
+# Auto Index Posts from Connected Channels
+@bot.on_message(filters.channel & (filters.document | filters.video | filters.audio))
+async def auto_index_channel(client, message):
+    try:
+        settings = await get_settings()
+        db_channels = settings.get("db_channels", [])
+        
+        if message.chat.id in db_channels:
+            clean_name = extract_file_name(message)
+            if clean_name:
+                await files_col.update_one(
+                    {"file_name": clean_name, "chat_id": message.chat.id},
+                    {"$set": {"msg_id": message.id, "original_caption": message.caption or clean_name}},
+                    upsert=True
+                )
+                print(f"[Indexed] {clean_name}")
+    except Exception as e:
+        print(f"Indexing Error: {e}")
 
-    if result.deleted_count > 0:
-        await message.reply_text(f"🗑️ Removed **{result.deleted_count}** indexed file(s) for query: **'{query}'**")
-    else:
-        await message.reply_text("❌ File not found in database.")
-
-# 8. MANUAL FORWARD FILE INDEXING
+# Manual Forwarded File Saver (Admin Only)
 @bot.on_message(filters.private & filters.forwarded & (filters.document | filters.video | filters.audio))
 async def manual_forward_index(client, message):
-    if not is_user_admin(message):
+    if not is_admin(message):
         return
 
     clean_name = extract_file_name(message)
@@ -258,30 +222,11 @@ async def manual_forward_index(client, message):
             {"$set": {"msg_id": msg_id, "original_caption": message.caption or clean_name}},
             upsert=True
         )
-        await message.reply_text(f"✅ **File Saved Successfully!**\n📌 `{clean_name}`")
-    else:
-        await message.reply_text("❌ **No valid file/video name found in message.**")
+        await message.reply_text(f"✅ **File Indexed:** `{clean_name}`")
 
-# 9. AUTO INDEX CHANNEL POSTS
-@bot.on_message(filters.channel & (filters.document | filters.video | filters.audio))
-async def auto_index_new_file(client, message):
-    try:
-        settings = await get_settings()
-        db_channels = settings.get("db_channels", [])
-        if message.chat.id in db_channels:
-            clean_name = extract_file_name(message)
-            if clean_name:
-                await files_col.update_one(
-                    {"file_name": clean_name, "chat_id": message.chat.id},
-                    {"$set": {"msg_id": message.id, "original_caption": message.caption or clean_name}},
-                    upsert=True
-                )
-                print(f"[Auto-Index Successful] Saved: {clean_name}")
-    except Exception as e:
-        print(f"Auto Index Error: {e}")
 
-# 10. SEARCH & SEND FILE LOGIC
-@bot.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start", "adddb", "deldb", "mydb", "settutorial", "setdirectlink", "delete"]))
+# ================= 6. Movie Search & Filter Logic =================
+@bot.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start", "adddb", "deldb", "settutorial"]))
 async def auto_filter_search(client, message):
     if message.forward_date:
         return
@@ -295,6 +240,7 @@ async def auto_filter_search(client, message):
     settings = await get_settings()
     found_files = []
 
+    # Fuzzy Matching: Splits words so "Hanuman" matches "Hanuman 2024 1080p"
     words = query.split()
     regex_pattern = "".join([f"(?=.*{re.escape(w)})" for w in words])
     
@@ -304,18 +250,13 @@ async def auto_filter_search(client, message):
 
     if found_files:
         success = False
-        for chat_id, msg_id, f_name in found_files[:3]:
+        # Send up to 5 matching files
+        for chat_id, msg_id, f_name in found_files[:5]:
             try:
-                await ensure_chat_cached(client, chat_id)
+                # Direct File TG Link
+                file_link = f"https://t.me/c/{str(chat_id).replace('-100', '')}/{msg_id}"
 
-                buttons = []
-                if settings.get("custom_direct_link"):
-                    file_link = settings["custom_direct_link"]
-                else:
-                    file_link = f"https://t.me/c/{str(chat_id).replace('-100', '')}/{msg_id}"
-
-                buttons.append([InlineKeyboardButton("📁 Direct File", url=file_link)])
-
+                buttons = [[InlineKeyboardButton("📁 Direct File", url=file_link)]]
                 if settings.get("tutorial_link"):
                     buttons.append([InlineKeyboardButton("❓ How to Download", url=settings["tutorial_link"])])
 
@@ -328,12 +269,15 @@ async def auto_filter_search(client, message):
                     reply_markup=reply_markup
                 )
 
+                # Trigger Auto Delete
                 asyncio.create_task(auto_delete_task(sent_file, AUTO_DELETE_TIME))
                 success = True
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.8)
 
-            except Exception as e:
-                print(f"Send File Error: {e}")
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+            except RPCError as e:
+                print(f"Send Error: {e}")
 
         if success:
             return
@@ -341,6 +285,7 @@ async def auto_filter_search(client, message):
     not_found_msg = await message.reply_text("❌ **This file is currently unavailable, but it will be uploaded soon.**")
     asyncio.create_task(auto_delete_task(not_found_msg, 10))
 
+# ================= 7. Bot Runner =================
 if __name__ == "__main__":
     print("Auto Filter Bot successfully started...")
     bot.run()
