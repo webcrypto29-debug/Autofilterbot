@@ -1,24 +1,45 @@
 import asyncio
 import os
 import re
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 import certifi
-from aiohttp import web
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, RPCError
 
-# ================= 1. Environment Variables =================
+# ================= 1. Render Web Server (Simple & Safe) =================
+PORT = int(os.environ.get("PORT", 8080))
+
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is Live & Running on Render!")
+
+    def log_message(self, format, *args):
+        return  # Render logs को साफ़ रखने के लिए
+
+def run_web_server():
+    server = HTTPServer(('0.0.0.0', PORT), SimpleHTTPRequestHandler)
+    print(f"Render Web Server started on port {PORT}")
+    server.serve_forever()
+
+# Background Thread में Web Server स्टार्ट करें
+threading.Thread(target=run_web_server, daemon=True).start()
+
+# ================= 2. Environment Variables =================
 API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 MONGO_URL = os.environ.get("MONGO_URL", "").strip()
-PORT = int(os.environ.get("PORT", 8080))
 
 AUTO_DELETE_TIME = 30  # Auto delete duration in seconds
 
-# ================= 2. Database Connection =================
+# ================= 3. Database Connection =================
 mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
 db = mongo_client["AutoFilterBotDB"]
 files_col = db["indexed_files"]
@@ -31,7 +52,7 @@ bot = Client(
     bot_token=BOT_TOKEN
 )
 
-# ================= 3. Helper Functions =================
+# Helper Functions
 async def get_settings():
     try:
         doc = await settings_col.find_one({"_id": "bot_settings"})
@@ -80,7 +101,7 @@ def is_admin(message):
     return bool(message.from_user and message.from_user.id == ADMIN_ID)
 
 
-# ================= 4. Bot Command Handlers =================
+# ================= 4. Commands Handlers =================
 
 # Start Command
 @bot.on_message(filters.command("start") & filters.private)
@@ -166,9 +187,9 @@ async def set_tutorial(client, message):
     await message.reply_text("✅ **Tutorial Link updated successfully!**")
 
 
-# ================= 5. File Indexing Logic =================
+# ================= 5. Auto File Indexing =================
 
-# Auto Index Posts from DB Channels
+# Auto Index Posts from Connected Channels
 @bot.on_message(filters.channel & (filters.document | filters.video | filters.audio))
 async def auto_index_channel(client, message):
     try:
@@ -208,7 +229,7 @@ async def manual_forward_index(client, message):
         await message.reply_text(f"✅ **File Saved to DB:** `{clean_name}`")
 
 
-# ================= 6. Search & Send Engine =================
+# ================= 6. Search & Filter Engine =================
 @bot.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start", "adddb", "deldb", "settutorial"]))
 async def auto_filter_search(client, message):
     if message.forward_date:
@@ -223,7 +244,6 @@ async def auto_filter_search(client, message):
     settings = await get_settings()
     found_files = []
 
-    # Word-by-Word Fuzzy Matching Regex
     words = query.split()
     regex_pattern = "".join([f"(?=.*{re.escape(w)})" for w in words])
     
@@ -235,7 +255,6 @@ async def auto_filter_search(client, message):
         success = False
         for chat_id, msg_id, f_name in found_files[:5]:
             try:
-                # Telegram Direct File Link
                 file_link = f"https://t.me/c/{str(chat_id).replace('-100', '')}/{msg_id}"
 
                 buttons = [[InlineKeyboardButton("📁 Direct File", url=file_link)]]
@@ -267,30 +286,7 @@ async def auto_filter_search(client, message):
     asyncio.create_task(auto_delete_task(not_found_msg, 10))
 
 
-# ================= 7. Render Web Server & Main Async Loop =================
-async def web_handle(request):
-    return web.Response(text="Bot is Live and Running on Render Web Service!")
-
-async def main():
-    # 1. Setup Web Server for Render Health Check
-    app = web.Application()
-    app.router.add_get("/", web_handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"Render Web Server started on port {PORT}")
-
-    # 2. Start Pyrogram Client
-    await bot.start()
-    print("Pyrogram Auto Filter Bot Started!")
-    
-    # 3. Keep Event Loop Alive
-    await asyncio.Event().wait()
-
+# ================= 7. Safe Execution =================
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        print("Bot Stopped!")
+    print("Auto Filter Bot starting...")
+    bot.run()  # Pyrogram internally handles loop creation safely
