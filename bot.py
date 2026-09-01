@@ -6,11 +6,11 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, RPCError
 
-# ================= 1. Render Web Server (Simple & Safe) =================
+# ================= 1. Render Web Server =================
 PORT = int(os.environ.get("PORT", 8080))
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -20,14 +20,13 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is Live & Running on Render!")
 
     def log_message(self, format, *args):
-        return  # Render logs को साफ़ रखने के लिए
+        return
 
 def run_web_server():
     server = HTTPServer(('0.0.0.0', PORT), SimpleHTTPRequestHandler)
     print(f"Render Web Server started on port {PORT}")
     server.serve_forever()
 
-# Background Thread में Web Server स्टार्ट करें
 threading.Thread(target=run_web_server, daemon=True).start()
 
 # ================= 2. Environment Variables =================
@@ -39,12 +38,7 @@ MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 
 AUTO_DELETE_TIME = 30  # Auto delete duration in seconds
 
-# ================= 3. Database Connection =================
-mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
-db = mongo_client["AutoFilterBotDB"]
-files_col = db["indexed_files"]
-settings_col = db["settings"]
-
+# Pyrogram Client Setup
 bot = Client(
     "auto_filter_bot",
     api_id=API_ID,
@@ -52,8 +46,22 @@ bot = Client(
     bot_token=BOT_TOKEN
 )
 
+# Lazy Database Initialization (Python 3.12+ Event Loop Fix)
+mongo_client = None
+files_col = None
+settings_col = None
+
+def init_db():
+    global mongo_client, files_col, settings_col
+    if mongo_client is None:
+        mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
+        db = mongo_client["AutoFilterBotDB"]
+        files_col = db["indexed_files"]
+        settings_col = db["settings"]
+
 # Helper Functions
 async def get_settings():
+    init_db()
     try:
         doc = await settings_col.find_one({"_id": "bot_settings"})
         if not doc:
@@ -70,6 +78,7 @@ async def get_settings():
         return {"_id": "bot_settings", "db_channels": [], "tutorial_link": None}
 
 async def update_settings(data):
+    init_db()
     await settings_col.update_one({"_id": "bot_settings"}, {"$set": data}, upsert=True)
 
 def clean_text(text):
@@ -95,15 +104,14 @@ async def auto_delete_task(sent_msg, duration=AUTO_DELETE_TIME):
     try:
         await sent_msg.delete()
     except Exception:
-        pass  # Message already deleted
+        pass
 
 def is_admin(message):
     return bool(message.from_user and message.from_user.id == ADMIN_ID)
 
 
-# ================= 4. Commands Handlers =================
+# ================= 3. Commands Handlers =================
 
-# Start Command
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     user_name = message.from_user.first_name if message.from_user else "User"
@@ -125,7 +133,6 @@ async def start_handler(client, message):
     reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
     await message.reply_text(welcome_text, reply_markup=reply_markup)
 
-# Add Database Channel
 @bot.on_message(filters.command("adddb"))
 async def add_db_channel(client, message):
     if not is_admin(message):
@@ -150,7 +157,6 @@ async def add_db_channel(client, message):
     except Exception as e:
         await message.reply_text(f"❌ Cannot access channel. Make sure Bot is Admin in it.\nError: `{e}`")
 
-# Delete Database Channel
 @bot.on_message(filters.command("deldb"))
 async def del_db_channel(client, message):
     if not is_admin(message):
@@ -173,7 +179,6 @@ async def del_db_channel(client, message):
     except Exception as e:
         await message.reply_text(f"❌ Error: `{e}`")
 
-# Set Tutorial Link
 @bot.on_message(filters.command("settutorial"))
 async def set_tutorial(client, message):
     if not is_admin(message):
@@ -187,11 +192,11 @@ async def set_tutorial(client, message):
     await message.reply_text("✅ **Tutorial Link updated successfully!**")
 
 
-# ================= 5. Auto File Indexing =================
+# ================= 4. Auto Indexing & Search =================
 
-# Auto Index Posts from Connected Channels
 @bot.on_message(filters.channel & (filters.document | filters.video | filters.audio))
 async def auto_index_channel(client, message):
+    init_db()
     try:
         settings = await get_settings()
         db_channels = settings.get("db_channels", [])
@@ -208,12 +213,12 @@ async def auto_index_channel(client, message):
     except Exception as e:
         print(f"Indexing Error: {e}")
 
-# Manual Forwarded File Saver (Admin Only)
 @bot.on_message(filters.private & filters.forwarded & (filters.document | filters.video | filters.audio))
 async def manual_forward_index(client, message):
     if not is_admin(message):
         return
 
+    init_db()
     clean_name = extract_file_name(message)
     settings = await get_settings()
 
@@ -228,8 +233,6 @@ async def manual_forward_index(client, message):
         )
         await message.reply_text(f"✅ **File Saved to DB:** `{clean_name}`")
 
-
-# ================= 6. Search & Filter Engine =================
 @bot.on_message((filters.private | filters.group) & filters.text & ~filters.command(["start", "adddb", "deldb", "settutorial"]))
 async def auto_filter_search(client, message):
     if message.forward_date:
@@ -241,6 +244,7 @@ async def auto_filter_search(client, message):
     if not query or len(query) < 2:
         return
 
+    init_db()
     settings = await get_settings()
     found_files = []
 
@@ -286,7 +290,13 @@ async def auto_filter_search(client, message):
     asyncio.create_task(auto_delete_task(not_found_msg, 10))
 
 
-# ================= 7. Safe Execution =================
+# ================= 5. Main Event Loop Starter =================
+async def main():
+    init_db()
+    await bot.start()
+    print("Auto Filter Bot started successfully!")
+    await idle()
+    await bot.stop()
+
 if __name__ == "__main__":
-    print("Auto Filter Bot starting...")
-    bot.run()  # Pyrogram internally handles loop creation safely
+    asyncio.run(main())
