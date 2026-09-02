@@ -9,12 +9,12 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
 
-# --- Web Server (Keep-Alive for Render / UptimeRobot) ---
+# --- Keep-Alive Web Server for Render / UptimeRobot ---
 web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "24h Token Auto Filter Bot Active & Running!"
+    return "24h Token Auto Filter Bot is Running Successfully!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -22,9 +22,9 @@ def run_web():
 
 # --- Configuration (Environment Variables) ---
 API_ID = int(os.environ.get("API_ID", "123456"))
-API_HASH = os.environ.get("API_HASH", "YOUR_API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
-MONGO_URI = os.environ.get("MONGO_URI", "YOUR_MONGO_URI")
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+MONGO_URI = os.environ.get("MONGO_URI", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 # --- Database Setup ---
@@ -34,14 +34,13 @@ files_col = db["files"]
 users_col = db["users"]
 settings_col = db["settings"]
 
-# --- Helper: Get Dynamic Shortener Settings ---
+# --- Shortener Helper Functions ---
 def get_shortener_settings():
     settings = settings_col.find_one({"type": "shortener"})
     if settings:
         return settings.get("url", ""), settings.get("api", ""), settings.get("status", True)
     return os.environ.get("SHORTENER_URL", ""), os.environ.get("SHORTENER_API", ""), True
 
-# --- Helper: URL Shortener Call ---
 def get_shortlink(url):
     s_url, s_api, status = get_shortener_settings()
     if not status or not s_api or not s_url:
@@ -53,10 +52,10 @@ def get_shortlink(url):
             return res.get("shortlink")
         return url
     except Exception as e:
-        print(f"Shortener Error: {e}")
+        print(f"Shortener API Error: {e}")
         return url
 
-# --- Helper: Token Verification Check ---
+# --- 24-Hour Token Verification Logic ---
 def is_user_verified(user_id):
     user = users_col.find_one({"user_id": user_id})
     if not user:
@@ -68,14 +67,14 @@ def is_user_verified(user_id):
     
     now = datetime.datetime.utcnow()
     time_diff = (now - last_verified).total_seconds()
-    if time_diff < 86400:  # 24 Hours
+    if time_diff < 86400:  # 24 Hours in seconds
         return True
     return False
 
 # --- Bot Client ---
 app = Client("AutoFilterBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- Admin Commands ---
+# --- Admin Commands (Control Shortener from Telegram Chat) ---
 
 @app.on_message(filters.command("set_shortener") & filters.user(ADMIN_ID))
 async def set_shortener_cmd(client, message):
@@ -98,14 +97,14 @@ async def set_api_cmd(client, message):
 @app.on_message(filters.command("shortener_off") & filters.user(ADMIN_ID))
 async def shortener_off_cmd(client, message):
     settings_col.update_one({"type": "shortener"}, {"$set": {"status": False}}, upsert=True)
-    await message.reply_text("🚫 **Shortener Status:** OFF")
+    await message.reply_text("🚫 **Shortener Status:** OFF (Direct links enabled)")
 
 @app.on_message(filters.command("shortener_on") & filters.user(ADMIN_ID))
 async def shortener_on_cmd(client, message):
     settings_col.update_one({"type": "shortener"}, {"$set": {"status": True}}, upsert=True)
-    await message.reply_text("⚡ **Shortener Status:** ON")
+    await message.reply_text("⚡ **Shortener Status:** ON (24h Pass active)")
 
-# --- Standard Commands ---
+# --- Standard User Commands ---
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
@@ -122,7 +121,7 @@ async def start_cmd(client, message):
             {"$set": {"verified_at": datetime.datetime.utcnow()}},
             upsert=True
         )
-        await message.reply_text("🎉 **Access Granted!**\n\nYour 24-hour pass is active. Search and download files freely.")
+        await message.reply_text("🎉 **Access Granted!**\n\nYour 24-hour pass is active. You can now search and download files freely!")
         return
 
     if len(text_args) > 1:
@@ -131,13 +130,13 @@ async def start_cmd(client, message):
             await client.send_cached_media(chat_id=message.chat.id, file_id=file_id)
             return
         except Exception:
-            await message.reply_text("❌ Failed to send file. It might be deleted.")
+            await message.reply_text("❌ Failed to send file. It may have been deleted.")
             return
 
     start_text = (
         f"👋 **Hello {message.from_user.first_name}!**\n\n"
         "I am an **Auto Filter Bot**.\n"
-        "Type any movie/file name in the chat to search.\n\n"
+        "Send any movie or file name in the chat to search.\n\n"
         "Use /help to view available commands."
     )
     await message.reply_text(start_text)
@@ -146,13 +145,15 @@ async def start_cmd(client, message):
 async def help_cmd(client, message):
     help_text = (
         "📖 **Commands List:**\n\n"
-        "• `/start` - Start bot / verify token\n"
-        "• `/stats` - Check database stats\n"
-        "• `/ping` - Check speed\n"
-        "• `/set_shortener <domain>` - Set shortener website\n"
+        "• `/start` - Start bot / verify access pass\n"
+        "• `/stats` - View database statistics\n"
+        "• `/ping` - Check server speed\n"
+        "• `/about` - About this bot\n\n"
+        "🛠 **Admin Commands:**\n"
+        "• `/set_shortener <domain>` - Set shortener site\n"
         "• `/set_api <key>` - Set API key\n"
-        "• `/shortener_off` - Disable shortener\n"
-        "• `/shortener_on` - Enable shortener"
+        "• `/shortener_off` - Turn shortener OFF\n"
+        "• `/shortener_on` - Turn shortener ON"
     )
     await message.reply_text(help_text)
 
@@ -174,12 +175,12 @@ async def stats_cmd(client, message):
         "📊 **Bot Statistics**\n\n"
         f"📁 **Saved Files:** `{total_files}`\n"
         f"👤 **Total Users:** `{total_users}`\n"
-        f"🌐 **Active Shortener:** `{s_url if s_url else 'None'}`\n"
-        f"⚡ **Shortener Mode:** `{'ON' if s_status else 'OFF'}`"
+        f"🌐 **Shortener Site:** `{s_url if s_url else 'None'}`\n"
+        f"⚡ **Shortener Status:** `{'ON' if s_status else 'OFF'}`"
     )
     await message.reply_text(stats_text)
 
-# --- Index Files ---
+# --- Index Files From Channel ---
 @app.on_message(filters.channel & (filters.document | filters.video))
 async def index_files(client, message):
     try:
@@ -222,8 +223,8 @@ async def auto_filter(client, message):
 
         await message.reply_text(
             f"🔒 **Search Result For:** `{query}`\n\n"
-            "Your 24-hour pass has expired.\n"
-            "Click below to get your **24-Hour Access Token**.",
+            "Your 24-hour pass has expired or you are a new user.\n"
+            "Click below to get your **24-Hour Access Pass**.",
             reply_markup=btn
         )
         return
@@ -240,7 +241,7 @@ async def auto_filter(client, message):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-# --- Async Main ---
+# --- Async Main Loop ---
 async def main():
     Thread(target=run_web, daemon=True).start()
     await app.start()
