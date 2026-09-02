@@ -10,7 +10,7 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, RPCError
 
-# ================= 1. Render Keep-Alive Web Server =================
+# ================= 1. Render Web Server =================
 PORT = int(os.environ.get("PORT", 8080))
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -39,7 +39,7 @@ MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 
 AUTO_DELETE_TIME = 30  # Auto delete duration in seconds
 
-# Globals
+# Globals (Initialized inside main)
 bot = None
 files_col = None
 settings_col = None
@@ -106,9 +106,6 @@ async def main():
     files_col = db["indexed_files"]
     settings_col = db["settings"]
 
-    # Ensure MongoDB text index exists for super-fast searching
-    await files_col.create_index([("file_name", "text")])
-
     # Client Initialization Inside Event Loop
     bot = Client(
         "auto_filter_bot",
@@ -117,7 +114,7 @@ async def main():
         bot_token=BOT_TOKEN
     )
 
-    # Attach Handlers
+    # Attach Handlers Inside Main Loop
     @bot.on_message(filters.command("start") & filters.private)
     async def start_handler(client, message):
         user_name = message.from_user.first_name if message.from_user else "User"
@@ -256,7 +253,6 @@ async def main():
         settings = await get_settings()
         found_files = []
 
-        # Optimized multi-word search pattern using Regex Lookaheads
         words = query.split()
         regex_pattern = "".join([f"(?=.*{re.escape(w)})" for w in words])
         
@@ -277,7 +273,6 @@ async def main():
 
                     reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
 
-                    # Primary method: copy direct message from original db channel
                     sent_file = await client.copy_message(
                         chat_id=message.chat.id,
                         from_chat_id=chat_id,
@@ -292,7 +287,6 @@ async def main():
                 except FloodWait as e:
                     await asyncio.sleep(e.value)
                 except RPCError as e:
-                    # Fallback using direct file_id sending if channel copy fails
                     if doc.get("file_id"):
                         try:
                             sent_file = await client.send_cached_media(
@@ -304,8 +298,8 @@ async def main():
                             asyncio.create_task(auto_delete_task(sent_file, AUTO_DELETE_TIME))
                             success = True
                         except Exception as inner_e:
-                            print(f"Fallback Send Error: {inner_e}")
-                    print(f"Copy Error: {e}")
+                            print(f"Fallback Error: {inner_e}")
+                    print(f"Send Error: {e}")
 
             if success:
                 return
