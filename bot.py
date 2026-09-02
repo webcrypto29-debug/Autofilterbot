@@ -13,7 +13,7 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
-    return "24h Token Auto Filter Bot Active!"
+    return "24h Token Auto Filter Bot Active & Alive!"
 
 def run_web():
     port = int(os.environ.get("PORT", 8080))
@@ -26,14 +26,14 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 MONGO_URI = os.environ.get("MONGO_URI", "YOUR_MONGO_URI")
 
 # Shortener Settings
-SHORTENER_API = os.environ.get("SHORTENER_API", "YOUR_SHORTENER_API")
-SHORTENER_URL = os.environ.get("SHORTENER_URL", "gplinks.in")
+SHORTENER_API = os.environ.get("SHORTENER_API", "")
+SHORTENER_URL = os.environ.get("SHORTENER_URL", "")
 
 # --- Database Setup ---
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["AutoFilterDB"]
 files_col = db["files"]
-users_col = db["users"] # 24 Hours Token Status स्टोर करने के लिए
+users_col = db["users"]
 
 # --- Shortener Helper Function ---
 def get_shortlink(url):
@@ -59,10 +59,9 @@ def is_user_verified(user_id):
     if not last_verified:
         return False
     
-    # चेक करें कि क्या 24 घंटे बीत चुके हैं?
     now = datetime.datetime.utcnow()
     time_diff = (now - last_verified).total_seconds()
-    if time_diff < 86400: # 86400 Seconds = 24 Hours
+    if time_diff < 86400:  # 24 Hours
         return True
     return False
 
@@ -75,9 +74,7 @@ async def start_cmd(client, message):
     user_id = message.from_user.id
     text = message.text
 
-    # अगर यूज़र Shortener Link पास करके आया है (e.g. /start verify_12345)
     if len(text.split()) > 1 and text.split()[1].startswith("verify_"):
-        # यूज़र का टाइमस्टैम्प अपडेट करें (24 घंटे चालू)
         users_col.update_one(
             {"user_id": user_id},
             {"$set": {"verified_at": datetime.datetime.utcnow()}},
@@ -86,7 +83,7 @@ async def start_cmd(client, message):
         await message.reply_text("🎉 **बधाई हो! आपका 24 घंटे का एक्सेस वेरीफाई हो गया है।**\n\nअब आप बिना किसी Shortener के डायरेक्ट फाइलें डाउनलोड कर सकते हैं!")
         return
 
-    await message.reply_text("👋 **नमस्ते!** मैं आपका Auto Filter Bot हूँ। किसी भी मूवी या फ़ाइल का नाम लिखकर ग्रुप में सर्च करें।")
+    await message.reply_text("👋 **नमस्ते!** मैं आपका Auto Filter Bot हूँ। किसी भी मूवी या फ़ाइल का नाम लिखकर सर्च करें।")
 
 # 2. File Saver from Database Channel
 @app.on_message(filters.channel & (filters.document | filters.video))
@@ -123,9 +120,7 @@ async def auto_filter(client, message):
     bot_username = (await client.get_me()).username
     verified = is_user_verified(user_id)
 
-    # अगर यूज़र 24 घंटे के अंदर वेरीफाइड नहीं है
     if not verified:
-        # Token Generate URL बनाएँ
         raw_verify_url = f"https://t.me/{bot_username}?start=verify_{user_id}"
         short_verify_url = get_shortlink(raw_verify_url)
 
@@ -136,17 +131,15 @@ async def auto_filter(client, message):
         await message.reply_text(
             f"🔒 **आपकी खोज:** `{query}`\n\n"
             f"आपका 24 घंटे का एक्सेस समाप्त हो गया है या आप नए यूज़र हैं।\n"
-            f"नीचे दिए गए बटन पर क्लिक करके **24 घंटे का टोकन** प्राप्त करें। उसके बाद आप पूरे दिन डायरेक्ट फाइल्स पा सकेंगे!",
+            f"नीचे दिए गए बटन पर क्लिक करके **24 घंटे का टोकन** प्राप्त करें।",
             reply_markup=btn
         )
         return
 
-    # अगर यूज़र वेरीफाइड है 👉 डायरेक्ट फाइल्स दें!
     buttons = []
     for file in results:
         f_name = file["file_name"]
         file_id = file["file_id"]
-        # Direct Telegram File Link
         direct_link = f"https://t.me/{bot_username}?start={file_id}"
         buttons.append([InlineKeyboardButton(text=f"🎬 {f_name[:35]}...", url=direct_link)])
 
@@ -155,6 +148,21 @@ async def auto_filter(client, message):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-if __name__ == "__main__":
+# --- Correct Execution for Render (Async Event Loop Integration) ---
+async def main():
+    # Flask को Separate Background Thread में चलाएं
     Thread(target=run_web, daemon=True).start()
-    app.run()
+    
+    # Pyrogram Bot Client स्टार्ट करें
+    await app.start()
+    print("Auto Filter Bot Started Successfully!")
+    
+    # Bot को लगातार चालू रखने के लिए idle event loop चलाएं
+    from pyrogram import idle
+    await idle()
+    
+    await app.stop()
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
