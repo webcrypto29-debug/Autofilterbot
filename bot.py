@@ -10,17 +10,18 @@ from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, RPCError
 
-# ================= 1. Render Web Server =================
+# ================= 1. Render Keep-Alive Web Server =================
 PORT = int(os.environ.get("PORT", 8080))
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Bot is Live & Running on Render!")
 
     def log_message(self, format, *args):
-        return  # Logs clean रखने के लिए
+        return  # Keep logs clean
 
 def run_web_server():
     server = HTTPServer(('0.0.0.0', PORT), SimpleHTTPRequestHandler)
@@ -38,7 +39,7 @@ MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 
 AUTO_DELETE_TIME = 30  # Auto delete duration in seconds
 
-# Globals (Main के अंदर सेट होंगे)
+# Globals
 bot = None
 files_col = None
 settings_col = None
@@ -70,17 +71,19 @@ def clean_text(text):
     text = re.sub(r'[._\-\[\]\(\)]', ' ', str(text)).lower().strip()
     return " ".join(text.split())
 
-def extract_file_name(message):
+def extract_file_details(message):
+    media = message.document or message.video or message.audio
     file_name = None
-    if message.document:
-        file_name = message.document.file_name
-    elif message.video:
-        file_name = message.video.file_name or message.caption
-    elif message.audio:
-        file_name = message.audio.file_name or message.caption
+    file_id = None
+    
+    if media:
+        file_name = getattr(media, "file_name", None) or message.caption
+        file_id = media.file_id
     elif message.caption:
         file_name = message.caption
-    return clean_text(file_name)
+
+    clean_name = clean_text(file_name) if file_name else ""
+    return clean_name, file_id
 
 async def auto_delete_task(sent_msg, duration=AUTO_DELETE_TIME):
     await asyncio.sleep(duration)
@@ -102,6 +105,9 @@ async def main():
     db = mongo_client["AutoFilterBotDB"]
     files_col = db["indexed_files"]
     settings_col = db["settings"]
+
+    # Ensure MongoDB text index exists for super-fast searching
+    await files_col.create_index([("file_name", "text")])
 
     # Client Initialization Inside Event Loop
     bot = Client(
@@ -198,11 +204,15 @@ async def main():
             db_channels = settings.get("db_channels", [])
             
             if message.chat.id in db_channels:
-                clean_name = extract_file_name(message)
+                clean_name, file_id = extract_file_details(message)
                 if clean_name:
                     await files_col.update_one(
                         {"file_name": clean_name, "chat_id": message.chat.id},
-                        {"$set": {"msg_id": message.id, "original_caption": message.caption or clean_name}},
+                        {"$set": {
+                            "msg_id": message.id, 
+                            "file_id": file_id,
+                            "original_caption": message.caption or clean_name
+                        }},
                         upsert=True
                     )
                     print(f"[Auto-Indexed] {clean_name}")
@@ -214,7 +224,7 @@ async def main():
         if not is_admin(message):
             return
 
-        clean_name = extract_file_name(message)
+        clean_name, file_id = extract_file_details(message)
         settings = await get_settings()
 
         if clean_name:
@@ -223,7 +233,11 @@ async def main():
 
             await files_col.update_one(
                 {"file_name": clean_name, "chat_id": chat_id},
-                {"$set": {"msg_id": msg_id, "original_caption": message.caption or clean_name}},
+                {"$set": {
+                    "msg_id": msg_id, 
+                    "file_id": file_id,
+                    "original_caption": message.caption or clean_name
+                }},
                 upsert=True
             )
             await message.reply_text(f"✅ **File Saved to DB:** `{clean_name}`")
@@ -242,25 +256,28 @@ async def main():
         settings = await get_settings()
         found_files = []
 
+        # Optimized multi-word search pattern using Regex Lookaheads
         words = query.split()
         regex_pattern = "".join([f"(?=.*{re.escape(w)})" for w in words])
         
-        cursor = files_col.find({"file_name": {"$regex": regex_pattern, "$options": "i"}})
+        cursor = files_col.find({"file_name": {"$regex": regex_pattern, "$options": "i"}}).limit(5)
         async for doc in cursor:
-            found_files.append((doc["chat_id"], doc["msg_id"], doc["file_name"]))
+            found_files.append(doc)
 
         if found_files:
             success = False
-            for chat_id, msg_id, f_name in found_files[:5]:
+            for doc in found_files:
+                chat_id = doc["chat_id"]
+                msg_id = doc["msg_id"]
+                
                 try:
-                    file_link = f"https://t.me/c/{str(chat_id).replace('-100', '')}/{msg_id}"
-
-                    buttons = [[InlineKeyboardButton("📁 Direct File", url=file_link)]]
+                    buttons = []
                     if settings.get("tutorial_link"):
                         buttons.append([InlineKeyboardButton("❓ How to Download", url=settings["tutorial_link"])])
 
-                    reply_markup = InlineKeyboardMarkup(buttons)
+                    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
 
+                    # Primary method: copy direct message from original db channel
                     sent_file = await client.copy_message(
                         chat_id=message.chat.id,
                         from_chat_id=chat_id,
@@ -275,7 +292,20 @@ async def main():
                 except FloodWait as e:
                     await asyncio.sleep(e.value)
                 except RPCError as e:
-                    print(f"Send Error: {e}")
+                    # Fallback using direct file_id sending if channel copy fails
+                    if doc.get("file_id"):
+                        try:
+                            sent_file = await client.send_cached_media(
+                                chat_id=message.chat.id,
+                                file_id=doc["file_id"],
+                                caption=doc.get("original_caption", ""),
+                                reply_markup=reply_markup
+                            )
+                            asyncio.create_task(auto_delete_task(sent_file, AUTO_DELETE_TIME))
+                            success = True
+                        except Exception as inner_e:
+                            print(f"Fallback Send Error: {inner_e}")
+                    print(f"Copy Error: {e}")
 
             if success:
                 return
