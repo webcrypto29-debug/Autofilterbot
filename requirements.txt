@@ -4,3 +4,4 @@ pymongo
 flask
 gunicorn
 dnspython
+requests
