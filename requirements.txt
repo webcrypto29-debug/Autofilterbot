@@ -1,5 +1,6 @@
 pyrogram
 tgcrypto
-motor
-certifi
-aiohttp
+pymongo
+flask
+gunicorn
+dnspython
