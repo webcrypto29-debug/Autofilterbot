@@ -21,24 +21,39 @@ def run_web():
     web_app.run(host="0.0.0.0", port=port)
 
 # --- Configuration (Environment Variables) ---
-API_ID = int(os.environ.get("API_ID", "123456"))
+API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-MONGO_URI = os.environ.get("MONGO_URI", "")
+MONGO_URI = os.environ.get("MONGO_URI", "").strip()
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# --- Database Setup ---
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["AutoFilterDB"]
-files_col = db["files"]
-users_col = db["users"]
-settings_col = db["settings"]
+# --- Safe Database Setup ---
+if not MONGO_URI:
+    print("❌ ERROR: MONGO_URI environment variable is missing or empty!")
+    print("Please add MONGO_URI in Render Environment Variables.")
+
+try:
+    mongo_client = MongoClient(MONGO_URI) if MONGO_URI else None
+    if mongo_client:
+        db = mongo_client["AutoFilterDB"]
+        files_col = db["files"]
+        users_col = db["users"]
+        settings_col = db["settings"]
+    else:
+        files_col = users_col = settings_col = None
+except Exception as e:
+    print(f"❌ Database Connection Error: {e}")
+    files_col = users_col = settings_col = None
 
 # --- Shortener Helper Functions ---
 def get_shortener_settings():
-    settings = settings_col.find_one({"type": "shortener"})
-    if settings:
-        return settings.get("url", ""), settings.get("api", ""), settings.get("status", True)
+    if settings_col is not None:
+        try:
+            settings = settings_col.find_one({"type": "shortener"})
+            if settings:
+                return settings.get("url", ""), settings.get("api", ""), settings.get("status", True)
+        except Exception as e:
+            print(f"DB Error in get_shortener_settings: {e}")
     return os.environ.get("SHORTENER_URL", ""), os.environ.get("SHORTENER_API", ""), True
 
 def get_shortlink(url):
@@ -57,18 +72,23 @@ def get_shortlink(url):
 
 # --- 24-Hour Token Verification Logic ---
 def is_user_verified(user_id):
-    user = users_col.find_one({"user_id": user_id})
-    if not user:
+    if users_col is None:
         return False
-    
-    last_verified = user.get("verified_at")
-    if not last_verified:
-        return False
-    
-    now = datetime.datetime.utcnow()
-    time_diff = (now - last_verified).total_seconds()
-    if time_diff < 86400:  # 24 Hours in seconds
-        return True
+    try:
+        user = users_col.find_one({"user_id": user_id})
+        if not user:
+            return False
+        
+        last_verified = user.get("verified_at")
+        if not last_verified:
+            return False
+        
+        now = datetime.datetime.utcnow()
+        time_diff = (now - last_verified).total_seconds()
+        if time_diff < 86400:  # 24 Hours in seconds
+            return True
+    except Exception as e:
+        print(f"Verification Check Error: {e}")
     return False
 
 # --- Bot Client ---
@@ -78,6 +98,9 @@ app = Client("AutoFilterBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TO
 
 @app.on_message(filters.command("set_shortener") & filters.user(ADMIN_ID))
 async def set_shortener_cmd(client, message):
+    if settings_col is None:
+        await message.reply_text("❌ Database not connected!")
+        return
     if len(message.command) < 2:
         await message.reply_text("⚠️ **Usage:** `/set_shortener gplinks.in`")
         return
@@ -87,6 +110,9 @@ async def set_shortener_cmd(client, message):
 
 @app.on_message(filters.command("set_api") & filters.user(ADMIN_ID))
 async def set_api_cmd(client, message):
+    if settings_col is None:
+        await message.reply_text("❌ Database not connected!")
+        return
     if len(message.command) < 2:
         await message.reply_text("⚠️ **Usage:** `/set_api your_api_key_here`")
         return
@@ -96,11 +122,17 @@ async def set_api_cmd(client, message):
 
 @app.on_message(filters.command("shortener_off") & filters.user(ADMIN_ID))
 async def shortener_off_cmd(client, message):
+    if settings_col is None:
+        await message.reply_text("❌ Database not connected!")
+        return
     settings_col.update_one({"type": "shortener"}, {"$set": {"status": False}}, upsert=True)
     await message.reply_text("🚫 **Shortener Status:** OFF (Direct links enabled)")
 
 @app.on_message(filters.command("shortener_on") & filters.user(ADMIN_ID))
 async def shortener_on_cmd(client, message):
+    if settings_col is None:
+        await message.reply_text("❌ Database not connected!")
+        return
     settings_col.update_one({"type": "shortener"}, {"$set": {"status": True}}, upsert=True)
     await message.reply_text("⚡ **Shortener Status:** ON (24h Pass active)")
 
@@ -110,17 +142,18 @@ async def shortener_on_cmd(client, message):
 async def start_cmd(client, message):
     user_id = message.from_user.id
     
-    if not users_col.find_one({"user_id": user_id}):
+    if users_col is not None and not users_col.find_one({"user_id": user_id}):
         users_col.insert_one({"user_id": user_id, "joined_at": datetime.datetime.utcnow()})
 
     text_args = message.text.split()
 
     if len(text_args) > 1 and text_args[1].startswith("verify_"):
-        users_col.update_one(
-            {"user_id": user_id},
-            {"$set": {"verified_at": datetime.datetime.utcnow()}},
-            upsert=True
-        )
+        if users_col is not None:
+            users_col.update_one(
+                {"user_id": user_id},
+                {"$set": {"verified_at": datetime.datetime.utcnow()}},
+                upsert=True
+            )
         await message.reply_text("🎉 **Access Granted!**\n\nYour 24-hour pass is active. You can now search and download files freely!")
         return
 
@@ -147,13 +180,12 @@ async def help_cmd(client, message):
         "📖 **Commands List:**\n\n"
         "• `/start` - Start bot / verify access pass\n"
         "• `/stats` - View database statistics\n"
-        "• `/ping` - Check server speed\n"
-        "• `/about` - About this bot\n\n"
+        "• `/ping` - Check server speed\n\n"
         "🛠 **Admin Commands:**\n"
         "• `/set_shortener <domain>` - Set shortener site\n"
         "• `/set_api <key>` - Set API key\n"
-        "• `/shortener_off` - Turn shortener OFF\n"
-        "• `/shortener_on` - Turn shortener ON"
+        "• `/shortener_off` - Turn off shortener\n"
+        "• `/shortener_on` - Turn on shortener"
     )
     await message.reply_text(help_text)
 
@@ -167,6 +199,9 @@ async def ping_cmd(client, message):
 
 @app.on_message(filters.command("stats"))
 async def stats_cmd(client, message):
+    if files_col is None or users_col is None:
+        await message.reply_text("❌ Database Connection Error.")
+        return
     total_files = files_col.count_documents({})
     total_users = users_col.count_documents({})
     s_url, _, s_status = get_shortener_settings()
@@ -183,6 +218,8 @@ async def stats_cmd(client, message):
 # --- Index Files From Channel ---
 @app.on_message(filters.channel & (filters.document | filters.video))
 async def index_files(client, message):
+    if files_col is None:
+        return
     try:
         media = message.document or message.video
         file_id = media.file_id
@@ -196,7 +233,7 @@ async def index_files(client, message):
 # --- Auto Filter Engine ---
 @app.on_message(filters.text & (filters.group | filters.private))
 async def auto_filter(client, message):
-    if message.text.startswith("/"):
+    if message.text.startswith("/") or files_col is None:
         return
 
     query = message.text.strip()
