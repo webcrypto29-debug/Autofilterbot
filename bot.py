@@ -21,7 +21,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is Live & Running on Render!")
 
     def log_message(self, format, *args):
-        return  # Keep logs clean
+        return
 
 def run_web_server():
     server = HTTPServer(('0.0.0.0', PORT), SimpleHTTPRequestHandler)
@@ -39,32 +39,7 @@ MONGO_URL = os.environ.get("MONGO_URL", "").strip()
 
 AUTO_DELETE_TIME = 30  # Auto delete duration in seconds
 
-# Globals (Initialized inside main)
-bot = None
-files_col = None
-settings_col = None
-
-
-# Helper Functions
-async def get_settings():
-    try:
-        doc = await settings_col.find_one({"_id": "bot_settings"})
-        if not doc:
-            default_settings = {
-                "_id": "bot_settings", 
-                "db_channels": [], 
-                "tutorial_link": None
-            }
-            await settings_col.insert_one(default_settings)
-            return default_settings
-        return doc
-    except Exception as e:
-        print(f"Database Error: {e}")
-        return {"_id": "bot_settings", "db_channels": [], "tutorial_link": None}
-
-async def update_settings(data):
-    await settings_col.update_one({"_id": "bot_settings"}, {"$set": data}, upsert=True)
-
+# Helpers
 def clean_text(text):
     if not text:
         return ""
@@ -98,15 +73,13 @@ def is_admin(message):
 
 # ================= 3. Main Async Starter =================
 async def main():
-    global bot, files_col, settings_col
-
     # Database Initialization Inside Event Loop
     mongo_client = AsyncIOMotorClient(MONGO_URL, tlsCAFile=certifi.where())
     db = mongo_client["AutoFilterBotDB"]
     files_col = db["indexed_files"]
     settings_col = db["settings"]
 
-    # Client Initialization Inside Event Loop
+    # Client Initialization Inside Event Loop (Fixes RuntimeError)
     bot = Client(
         "auto_filter_bot",
         api_id=API_ID,
@@ -114,7 +87,26 @@ async def main():
         bot_token=BOT_TOKEN
     )
 
-    # Attach Handlers Inside Main Loop
+    async def get_settings():
+        try:
+            doc = await settings_col.find_one({"_id": "bot_settings"})
+            if not doc:
+                default_settings = {
+                    "_id": "bot_settings", 
+                    "db_channels": [], 
+                    "tutorial_link": None
+                }
+                await settings_col.insert_one(default_settings)
+                return default_settings
+            return doc
+        except Exception as e:
+            print(f"Database Error: {e}")
+            return {"_id": "bot_settings", "db_channels": [], "tutorial_link": None}
+
+    async def update_settings(data):
+        await settings_col.update_one({"_id": "bot_settings"}, {"$set": data}, upsert=True)
+
+    # Attach Handlers
     @bot.on_message(filters.command("start") & filters.private)
     async def start_handler(client, message):
         user_name = message.from_user.first_name if message.from_user else "User"
@@ -307,7 +299,7 @@ async def main():
         not_found_msg = await message.reply_text("❌ **This file is currently unavailable, but it will be uploaded soon.**")
         asyncio.create_task(auto_delete_task(not_found_msg, 10))
 
-    # Start Bot Session
+    # Start Bot Session Properly inside Event Loop
     await bot.start()
     print("Auto Filter Bot started successfully!")
     await idle()
@@ -315,3 +307,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+        
